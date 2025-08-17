@@ -6,18 +6,9 @@ This repository contains a compact implementation of **CDS pricing** under both 
 
 ---
 
-## 📦 Contents
-
-```
-.
-├─ cds_models.py        # all models + plotting helpers
-├─ requirements.txt     # numpy, matplotlib
-└─ README.md            # this file
-```
-
 ---
 
-## 🚀 Quickstart
+## Quickstart
 
 ```bash
 # 1) create & activate a venv (optional)
@@ -32,7 +23,7 @@ python cds_models.py
 
 ---
 
-## 🔧 What the code does
+## What the code does
 
 - **Structural**
   - **Merton classic (toy)**: Monte Carlo of $V_t$ as GBM; "default" if $V_t<D$ at maturity $t$.
@@ -45,7 +36,7 @@ Each routine returns arrays ready to plot. See `demo_all()` in `cds_models.py`.
 
 ---
 
-## 📚 Theory (concise but complete)
+## Theory
 
 ### 1) Credit default swaps (CDS)
 
