@@ -162,3 +162,146 @@ def extended_merton_mc(
         cds[j] = prot_leg / annuity if annuity > 1e-16 else np.nan
 
     return t_grid, yield_spread, cds, pd
+
+
+# --------------------------------------
+# 3) Constant-intensity CDS (closed form)
+# --------------------------------------
+
+def constant_intensity_cds_spread(
+    lam=0.12, r=0.05, R=0.4, delta=0.25, T_grid=None
+):
+    """
+    Closed-form CDS fair spreads under flat hazard lam and flat discount rate r.
+    Protection leg: (1-R) * \int_0^T e^{-(r+lam)t} lam dt
+    Annuity (discrete): sum_i delta * e^{-(r+lam) t_i}, t_i=i*delta <= T
+
+    Args:
+        lam: constant hazard rate
+        r: risk-free rate
+        R: recovery rate
+        delta: premium interval (years)
+        T_grid: 1D array of maturities (years)
+
+    Returns:
+        spreads: 1D array same shape as T_grid
+    """
+    if T_grid is None:
+        T_grid = np.linspace(0.25, 10.0, 40)
+    T_grid = np.asarray(T_grid, dtype=float)
+
+    spreads = np.zeros_like(T_grid)
+    rl = r + lam
+    for k, T in enumerate(T_grid):
+        prot = (1.0 - R) * (lam / rl) * (1.0 - np.exp(-rl * T))
+        n = int(np.floor(T / delta))
+        times = np.arange(1, n + 1) * delta
+        ann = np.sum(delta * np.exp(-rl * times))
+        spreads[k] = prot / ann if ann > 0 else np.nan
+    return spreads
+
+
+# --------------------------------------
+# 4) Stochastic-intensity CDS (CIR/Cox) via MC
+# --------------------------------------
+
+def cox_cir_cds_spread(
+    kappa=0.8, theta=0.12, sigma=0.2, lambda0=0.12,
+    r=0.05, R=0.4,
+    T_grid=None, M=100000, dt=1/52, delta=0.25, seed=7
+):
+    """
+    Monte Carlo CDS spreads with a Cox process where lambda_t follows CIR:
+        d lambda_t = kappa (theta - lambda_t) dt + sigma sqrt(lambda_t) dW_t
+    We simulate lambda_t (Euler with full truncation), compute the integrated hazard,
+    sample default times by inversion with Exp(1) variables, and price CDS.
+
+    Args:
+        T_grid: 1D array of maturities (years).
+    Returns:
+        spreads: 1D array of fair spreads.
+    """
+    rng = _ensure_rng(seed)
+    if T_grid is None:
+        T_grid = np.linspace(0.25, 10.0, 40)
+    T_grid = np.asarray(T_grid, dtype=float)
+
+    T_max = float(np.max(T_grid))
+    Nt = int(np.ceil(T_max / dt))
+    t_axis = np.linspace(0.0, Nt * dt, Nt + 1)
+
+    lam = np.zeros((M, Nt + 1), dtype=float)
+    lam[:, 0] = lambda0
+
+    for t in range(1, Nt + 1):
+        dW = rng.standard_normal(M) * np.sqrt(dt)
+        # full truncation Euler to preserve non-negativity
+        lam_prev = np.maximum(lam[:, t - 1], 0.0)
+        lam[:, t] = lam_prev + kappa * (theta - lam_prev) * dt + sigma * np.sqrt(lam_prev) * dW
+        lam[:, t] = np.maximum(lam[:, t], 0.0)
+
+    # cumulative hazard \int_0^t lambda_s ds via trapezoid or simple Riemann
+    # use left Riemann: sum lam[:, :-1] * dt
+    cum_hazard = np.cumsum(lam[:, 1:] * dt, axis=1)  # shape (M, Nt)
+
+    # Default time by inversion with E~Exp(1): tau = inf{ t : H_t >= E }
+    E = rng.exponential(size=M)
+    crossed = cum_hazard >= E[:, None]
+    # argmax returns 0 where all False; we mask later
+    first_cross = np.argmax(crossed, axis=1)
+    has_default = crossed.any(axis=1)
+    tau = np.full(M, np.inf)
+    tau[has_default] = t_axis[1:][first_cross[has_default]]
+
+    # Price CDS for each T
+    spreads = np.zeros_like(T_grid)
+    for k, T in enumerate(T_grid):
+        prot = np.mean((1.0 - R) * np.exp(-r * np.minimum(tau, T)) * (tau <= T))
+        n = int(np.floor(T / delta))
+        times = np.arange(1, n + 1) * delta
+        # survival at payment times
+        surv = np.mean(tau[:, None] > times, axis=0)
+        annuity = np.sum(delta * np.exp(-r * times) * surv)
+        spreads[k] = prot / annuity if annuity > 0 else np.nan
+
+    return spreads
+
+
+# -------------------------------
+# Plotting helpers
+# -------------------------------
+
+def plot_series(x, y, title, xlabel, ylabel):
+    plt.figure(figsize=(8, 5))
+    plt.plot(x, y)
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+
+def demo_all():
+    # 1) Merton classic
+    t, cds_mc, pd_mc = merton_classic_mc()
+    plot_series(t, cds_mc, "CDS spread vs maturity — Merton classic (toy)", "Maturity (years)", "Spread")
+
+    # 2) Extended Merton
+    t, yld, cds_ext, pd_ext = extended_merton_mc()
+    plot_series(t, yld, "Yield spread vs maturity — Extended Merton (toy)", "Maturity (years)", "Yield spread")
+    plot_series(t, cds_ext, "CDS spread vs maturity — Extended Merton (toy)", "Maturity (years)", "Spread")
+    plot_series(t, pd_ext, "Default probability vs maturity — Extended Merton (toy)", "Maturity (years)", "PD")
+
+    # 3) Constant intensity
+    T_grid = np.linspace(0.25, 10.0, 40)
+    spreads_ci = constant_intensity_cds_spread(T_grid=T_grid)
+    plot_series(T_grid, spreads_ci, "CDS spread vs maturity — Constant intensity", "Maturity (years)", "Spread")
+
+    # 4) CIR/Cox intensity
+    spreads_cox = cox_cir_cds_spread(T_grid=T_grid, M=20000)  # lower M for speed in demo
+    plot_series(T_grid, spreads_cox, "CDS spread vs maturity — CIR/Cox intensity (MC)", "Maturity (years)", "Spread")
+
+
+if __name__ == "__main__":
+    demo_all()
